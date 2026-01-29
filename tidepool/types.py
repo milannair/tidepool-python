@@ -22,13 +22,14 @@ AttrValue = Union[
 class Document:
     id: str
     vector: Vector
+    text: Optional[str] = None
     attributes: Optional[Dict[str, AttrValue]] = None
 
 
 @dataclass
 class VectorResult:
     id: str
-    dist: float
+    score: float
     vector: Optional[Vector] = None
     attributes: Optional[Dict[str, AttrValue]] = None
 
@@ -43,6 +44,17 @@ class DistanceMetric(str, Enum):
     COSINE = "cosine_distance"
     EUCLIDEAN = "euclidean_squared"
     DOT_PRODUCT = "dot_product"
+
+
+class QueryMode(str, Enum):
+    VECTOR = "vector"
+    TEXT = "text"
+    HYBRID = "hybrid"
+
+
+class FusionMode(str, Enum):
+    BLEND = "blend"
+    RRF = "rrf"
 
 
 @dataclass

@@ -22,8 +22,9 @@ client = TidepoolClient(
 
 ```python
 client.upsert(vectors, namespace=None, distance_metric=DistanceMetric.COSINE)
-client.query(vector, top_k=10, namespace=None, distance_metric=DistanceMetric.COSINE,
-             include_vectors=False, filters=None, ef_search=None, nprobe=None)
+client.query(vector=None, top_k=10, namespace=None, distance_metric=DistanceMetric.COSINE,
+             include_vectors=False, filters=None, ef_search=None, nprobe=None,
+             text=None, mode=None, alpha=None, fusion=None, rrf_k=None)
 client.delete(ids, namespace=None)
 
 client.get_namespace(namespace=None)
@@ -35,6 +36,10 @@ client.compact(namespace=None)
 client.status()  # Ingest service status (global)
 client.health(service="query" | "ingest")
 ```
+
+## Full-Text & Hybrid Search
+
+Include `text` on documents to enable BM25 search. For queries, set `mode="text"` for BM25-only or `mode="hybrid"` to fuse vector and text results. Hybrid queries support `alpha` (blend weight) and `fusion="rrf"` when you want reciprocal-rank fusion instead of score blending.
 
 ## Response Models
 
@@ -56,6 +61,13 @@ class NamespaceStatus:
 class QueryResponse:
     results: List[VectorResult]
     namespace: str
+
+@dataclass
+class VectorResult:
+    id: str
+    score: float
+    vector: Optional[List[float]]
+    attributes: Optional[dict]
 
 @dataclass
 class NamespaceInfo:
@@ -83,7 +95,14 @@ def index_tenant_data(tenant_id: str, documents: List[dict]):
 
 def search_tenant(tenant_id: str, query: str, top_k: int = 10):
     query_vec = embed(query)
-    return client.query(query_vec, top_k=top_k, namespace=f"tenant_{tenant_id}")
+    return client.query(
+        vector=query_vec,
+        text=query,
+        mode="hybrid",
+        alpha=0.7,
+        top_k=top_k,
+        namespace=f"tenant_{tenant_id}",
+    )
 ```
 
 ### Different Data Types

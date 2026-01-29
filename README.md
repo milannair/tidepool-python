@@ -42,6 +42,7 @@ client.upsert(
         Document(
             id="doc-1",
             vector=[0.1, 0.2, 0.3, 0.4],
+            text="machine learning guide",
             attributes={"category": "news"},
         )
     ]
@@ -49,9 +50,15 @@ client.upsert(
 
 client.compact()
 
-response = client.query(vector=[0.1, 0.2, 0.3, 0.4], top_k=5)
+response = client.query(
+    vector=[0.1, 0.2, 0.3, 0.4],
+    text="machine learning",
+    mode="hybrid",
+    top_k=5,
+    alpha=0.7,
+)
 for result in response.results:
-    print(result.id, result.dist)
+    print(result.id, result.score)
 ```
 
 ## Async Usage
@@ -76,7 +83,7 @@ asyncio.run(main())
 
 - `TidepoolClient.health(service="query" | "ingest")`
 - `TidepoolClient.upsert(vectors, namespace=None, distance_metric=DistanceMetric.COSINE)`
-- `TidepoolClient.query(vector, top_k=10, namespace=None, distance_metric=DistanceMetric.COSINE, include_vectors=False, filters=None, ef_search=None, nprobe=None) -> QueryResponse`
+- `TidepoolClient.query(vector=None, top_k=10, namespace=None, distance_metric=DistanceMetric.COSINE, include_vectors=False, filters=None, ef_search=None, nprobe=None, text=None, mode=None, alpha=None, fusion=None, rrf_k=None) -> QueryResponse`
 - `TidepoolClient.delete(ids, namespace=None)`
 - `TidepoolClient.get_namespace(namespace=None)`
 - `TidepoolClient.get_namespace_status(namespace=None)`

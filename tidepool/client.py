@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -17,10 +18,12 @@ from .types import (
     AttrValue,
     DistanceMetric,
     Document,
+    FusionMode,
     IngestStatus,
     NamespaceInfo,
     NamespaceStatus,
     QueryResponse,
+    QueryMode,
     Vector,
     VectorResult,
 )
@@ -48,6 +51,55 @@ def _normalize_distance_metric(
                 "Distance metric must be one of: cosine_distance, euclidean_squared, dot_product"
             ) from exc
     raise ValidationError("Distance metric must be a DistanceMetric or string")
+
+
+def _normalize_query_text(text: Optional[str]) -> Optional[str]:
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        raise ValidationError("text must be a string")
+    stripped = text.strip()
+    return stripped if stripped else None
+
+
+def _normalize_query_mode(
+    mode: QueryMode | str | None, has_vector: bool, has_text: bool
+) -> str:
+    if mode is None:
+        if has_vector and has_text:
+            return QueryMode.HYBRID.value
+        if has_text:
+            return QueryMode.TEXT.value
+        return QueryMode.VECTOR.value
+    if isinstance(mode, QueryMode):
+        return mode.value
+    if isinstance(mode, str):
+        try:
+            return QueryMode(mode).value
+        except ValueError as exc:
+            raise ValidationError("mode must be one of: vector, text, hybrid") from exc
+    raise ValidationError("mode must be a QueryMode or string")
+
+
+def _normalize_fusion_mode(fusion: FusionMode | str | None) -> Optional[str]:
+    if fusion is None:
+        return None
+    if isinstance(fusion, FusionMode):
+        return fusion.value
+    if isinstance(fusion, str):
+        try:
+            return FusionMode(fusion).value
+        except ValueError as exc:
+            raise ValidationError("fusion must be one of: blend, rrf") from exc
+    raise ValidationError("fusion must be a FusionMode or string")
+
+
+def _normalize_alpha(alpha: Optional[float]) -> Optional[float]:
+    if alpha is None:
+        return None
+    if not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)):
+        raise ValidationError("alpha must be a finite number")
+    return max(0.0, min(1.0, float(alpha)))
 
 
 def _validate_vector(vector: Sequence[float], expected_dims: Optional[int] = None) -> List[float]:
@@ -127,8 +179,12 @@ def _validate_documents(vectors: Sequence[Document]) -> List[Document]:
         vector = _validate_vector(doc.vector, expected_dims)
         if expected_dims is None:
             expected_dims = len(vector)
+        if doc.text is not None and not isinstance(doc.text, str):
+            raise ValidationError("Document text must be a string")
         _validate_attributes(doc.attributes)
-        normalized.append(Document(id=doc.id, vector=vector, attributes=doc.attributes))
+        normalized.append(
+            Document(id=doc.id, vector=vector, text=doc.text, attributes=doc.attributes)
+        )
     return normalized
 
 
@@ -142,6 +198,8 @@ def _validate_positive_int(value: Optional[int], name: str) -> Optional[int]:
 
 def _document_to_payload(doc: Document) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"id": doc.id, "vector": list(doc.vector)}
+    if doc.text is not None:
+        payload["text"] = doc.text
     if doc.attributes is not None:
         payload["attributes"] = doc.attributes
     return payload
@@ -187,11 +245,11 @@ def _parse_vector_results(data: Any) -> List[VectorResult]:
     for item in items:
         if not isinstance(item, dict):
             raise TidepoolError("Invalid query response")
-        dist_value = item.get("dist", item.get("distance", 0.0))
+        score_value = item.get("score", item.get("dist", item.get("distance", 0.0)))
         results.append(
             VectorResult(
                 id=item.get("id"),
-                dist=float(dist_value or 0.0),
+                score=float(score_value or 0.0),
                 vector=item.get("vector"),
                 attributes=item.get("attributes"),
             )
@@ -398,7 +456,7 @@ class TidepoolClient:
 
     def query(
         self,
-        vector: Vector,
+        vector: Optional[Vector] = None,
         top_k: int = 10,
         namespace: Optional[str] = None,
         distance_metric: DistanceMetric | str | None = DistanceMetric.COSINE,
@@ -406,19 +464,43 @@ class TidepoolClient:
         filters: Optional[Dict[str, AttrValue]] = None,
         ef_search: Optional[int] = None,
         nprobe: Optional[int] = None,
+        text: Optional[str] = None,
+        mode: QueryMode | str | None = None,
+        alpha: Optional[float] = None,
+        fusion: FusionMode | str | None = None,
+        rrf_k: Optional[int] = None,
     ) -> QueryResponse:
-        vec = _validate_vector(vector)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValidationError("top_k must be a positive integer")
         _validate_filters(filters)
         ef_search = _validate_positive_int(ef_search, "ef_search")
         nprobe = _validate_positive_int(nprobe, "nprobe")
+        rrf_k = _validate_positive_int(rrf_k, "rrf_k")
         metric = _normalize_distance_metric(distance_metric)
+        normalized_text = _normalize_query_text(text)
+        has_text = normalized_text is not None
+        has_vector = vector is not None
+        normalized_vector = None
+        if vector is not None:
+            normalized_vector = _validate_vector(vector)
+        mode_value = _normalize_query_mode(mode, has_vector, has_text)
+        if mode_value == QueryMode.VECTOR.value and not has_vector:
+            raise ValidationError("vector is required")
+        if mode_value == QueryMode.TEXT.value and not has_text:
+            raise ValidationError("text is required")
+        if mode_value == QueryMode.HYBRID.value and (not has_vector or not has_text):
+            raise ValidationError("vector and text are required for hybrid")
+        fusion_value = _normalize_fusion_mode(fusion)
+        alpha_value = _normalize_alpha(alpha)
         payload: Dict[str, Any] = {
-            "vector": vec,
             "top_k": top_k,
             "include_vectors": bool(include_vectors),
+            "mode": mode_value,
         }
+        if normalized_vector is not None:
+            payload["vector"] = normalized_vector
+        if normalized_text is not None:
+            payload["text"] = normalized_text
         if metric is not None:
             payload["distance_metric"] = metric
         if filters is not None:
@@ -427,6 +509,12 @@ class TidepoolClient:
             payload["ef_search"] = ef_search
         if nprobe is not None:
             payload["nprobe"] = nprobe
+        if alpha_value is not None:
+            payload["alpha"] = alpha_value
+        if fusion_value is not None:
+            payload["fusion"] = fusion_value
+        if rrf_k is not None:
+            payload["rrf_k"] = rrf_k
         namespace = self._resolve_namespace(namespace)
         data = self._request_json(
             self._query_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
@@ -603,7 +691,7 @@ class AsyncTidepoolClient:
 
     async def query(
         self,
-        vector: Vector,
+        vector: Optional[Vector] = None,
         top_k: int = 10,
         namespace: Optional[str] = None,
         distance_metric: DistanceMetric | str | None = DistanceMetric.COSINE,
@@ -611,19 +699,43 @@ class AsyncTidepoolClient:
         filters: Optional[Dict[str, AttrValue]] = None,
         ef_search: Optional[int] = None,
         nprobe: Optional[int] = None,
+        text: Optional[str] = None,
+        mode: QueryMode | str | None = None,
+        alpha: Optional[float] = None,
+        fusion: FusionMode | str | None = None,
+        rrf_k: Optional[int] = None,
     ) -> QueryResponse:
-        vec = _validate_vector(vector)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValidationError("top_k must be a positive integer")
         _validate_filters(filters)
         ef_search = _validate_positive_int(ef_search, "ef_search")
         nprobe = _validate_positive_int(nprobe, "nprobe")
+        rrf_k = _validate_positive_int(rrf_k, "rrf_k")
         metric = _normalize_distance_metric(distance_metric)
+        normalized_text = _normalize_query_text(text)
+        has_text = normalized_text is not None
+        has_vector = vector is not None
+        normalized_vector = None
+        if vector is not None:
+            normalized_vector = _validate_vector(vector)
+        mode_value = _normalize_query_mode(mode, has_vector, has_text)
+        if mode_value == QueryMode.VECTOR.value and not has_vector:
+            raise ValidationError("vector is required")
+        if mode_value == QueryMode.TEXT.value and not has_text:
+            raise ValidationError("text is required")
+        if mode_value == QueryMode.HYBRID.value and (not has_vector or not has_text):
+            raise ValidationError("vector and text are required for hybrid")
+        fusion_value = _normalize_fusion_mode(fusion)
+        alpha_value = _normalize_alpha(alpha)
         payload: Dict[str, Any] = {
-            "vector": vec,
             "top_k": top_k,
             "include_vectors": bool(include_vectors),
+            "mode": mode_value,
         }
+        if normalized_vector is not None:
+            payload["vector"] = normalized_vector
+        if normalized_text is not None:
+            payload["text"] = normalized_text
         if metric is not None:
             payload["distance_metric"] = metric
         if filters is not None:
@@ -632,6 +744,12 @@ class AsyncTidepoolClient:
             payload["ef_search"] = ef_search
         if nprobe is not None:
             payload["nprobe"] = nprobe
+        if alpha_value is not None:
+            payload["alpha"] = alpha_value
+        if fusion_value is not None:
+            payload["fusion"] = fusion_value
+        if rrf_k is not None:
+            payload["rrf_k"] = rrf_k
         namespace = self._resolve_namespace(namespace)
         data = await self._request_json(
             self._query_client, "POST", f"/v1/vectors/{namespace}", json_body=payload

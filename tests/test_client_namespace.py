@@ -41,11 +41,11 @@ class NamespaceClientTests(unittest.TestCase):
                 )
             if path.endswith("/compact"):
                 return httpx.Response(204)
-            if method == "POST" and path.startswith("/v1/vectors/") and json and "vector" in json:
+            if method == "POST" and path.startswith("/v1/vectors/"):
                 namespace = path.rsplit("/", 1)[-1]
                 return httpx.Response(
                     200,
-                    json={"namespace": namespace, "results": [{"id": "a", "dist": 0.1}]},
+                    json={"namespace": namespace, "results": [{"id": "a", "score": 0.1}]},
                 )
             return httpx.Response(204)
 
@@ -93,6 +93,17 @@ class NamespaceClientTests(unittest.TestCase):
         paths = [call["path"] for call in self.calls]
         self.assertIn("/v1/vectors/tenant_a", paths)
         self.assertIn("/v1/vectors/tenant_b", paths)
+
+    def test_text_only_query(self) -> None:
+        client = TidepoolClient(default_namespace="default")
+        response = client.query(text="machine learning", mode="text")
+
+        self.assertEqual(response.namespace, "default")
+        last_call = self.calls[-1]
+        self.assertEqual(last_call["path"], "/v1/vectors/default")
+        self.assertEqual(last_call["json"]["mode"], "text")
+        self.assertEqual(last_call["json"]["text"], "machine learning")
+        self.assertNotIn("vector", last_call["json"])
 
     def test_list_namespaces_returns_info(self) -> None:
         client = TidepoolClient(default_namespace="default")
