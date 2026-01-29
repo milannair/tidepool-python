@@ -19,6 +19,8 @@ from .types import (
     Document,
     IngestStatus,
     NamespaceInfo,
+    NamespaceStatus,
+    QueryResponse,
     Vector,
     VectorResult,
 )
@@ -198,11 +200,41 @@ def _parse_vector_results(data: Any) -> List[VectorResult]:
 
 
 def _parse_namespace_info(data: Dict[str, Any]) -> NamespaceInfo:
+    pending = data.get("pending_compaction")
+    if pending is None:
+        pending = data.get("pendingCompaction")
+    if not isinstance(pending, bool):
+        pending = None
     return NamespaceInfo(
         namespace=data.get("namespace"),
         approx_count=int(data.get("approx_count", 0)),
         dimensions=int(data.get("dimensions", 0)),
+        pending_compaction=pending,
     )
+
+
+def _parse_namespaces(data: Any) -> List[NamespaceInfo]:
+    if isinstance(data, list):
+        infos: List[NamespaceInfo] = []
+        for item in data:
+            if isinstance(item, dict):
+                infos.append(_parse_namespace_info(item))
+            else:
+                infos.append(_parse_namespace_info({"namespace": str(item)}))
+        return infos
+    if isinstance(data, dict):
+        raw = data.get("namespaces")
+        if raw is None:
+            raw = data.get("namespace_list")
+        if isinstance(raw, list):
+            infos: List[NamespaceInfo] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    infos.append(_parse_namespace_info(item))
+                else:
+                    infos.append(_parse_namespace_info({"namespace": str(item)}))
+            return infos
+    raise TidepoolError("Invalid namespaces response")
 
 
 def _parse_ingest_status(data: Dict[str, Any]) -> IngestStatus:
@@ -214,6 +246,27 @@ def _parse_ingest_status(data: Dict[str, Any]) -> IngestStatus:
         total_vecs=int(data.get("total_vecs", 0)),
         dimensions=int(data.get("dimensions", 0)),
     )
+
+
+def _parse_namespace_status(data: Dict[str, Any]) -> NamespaceStatus:
+    return NamespaceStatus(
+        last_run=_parse_datetime(data.get("last_run")),
+        wal_files=int(data.get("wal_files", 0)),
+        wal_entries=int(data.get("wal_entries", 0)),
+        segments=int(data.get("segments", 0)),
+        total_vecs=int(data.get("total_vecs", 0)),
+        dimensions=int(data.get("dimensions", 0)),
+    )
+
+
+def _parse_query_response(data: Any, fallback_namespace: str) -> QueryResponse:
+    namespace = fallback_namespace
+    if isinstance(data, dict):
+        raw_namespace = data.get("namespace") or data.get("ns")
+        if isinstance(raw_namespace, str) and raw_namespace.strip():
+            namespace = raw_namespace
+    results = _parse_vector_results(data)
+    return QueryResponse(results=results, namespace=namespace)
 
 
 class TidepoolClient:
@@ -228,9 +281,12 @@ class TidepoolClient:
         query_url: str = "http://localhost:8080",
         ingest_url: str = "http://localhost:8081",
         timeout: float = 30.0,
-        namespace: str = "default",
+        default_namespace: str = "default",
+        namespace: Optional[str] = None,
     ) -> None:
-        self._namespace = namespace
+        if namespace is not None:
+            default_namespace = namespace
+        self._default_namespace = _normalize_namespace(default_namespace, "default")
         limits = httpx.Limits(max_connections=10, max_keepalive_connections=10)
         self._query_client = httpx.Client(
             base_url=query_url,
@@ -259,6 +315,9 @@ class TidepoolClient:
         if service == "ingest":
             return self._ingest_client
         raise ValidationError("Service must be 'query' or 'ingest'")
+
+    def _resolve_namespace(self, namespace: Optional[str]) -> str:
+        return _normalize_namespace(namespace, self._default_namespace)
 
     def _with_retry(self, func):
         last_error: Optional[Exception] = None
@@ -332,7 +391,7 @@ class TidepoolClient:
         }
         if metric is not None:
             payload["distance_metric"] = metric
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         self._request_json(
             self._ingest_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
         )
@@ -347,7 +406,7 @@ class TidepoolClient:
         filters: Optional[Dict[str, AttrValue]] = None,
         ef_search: Optional[int] = None,
         nprobe: Optional[int] = None,
-    ) -> List[VectorResult]:
+    ) -> QueryResponse:
         vec = _validate_vector(vector)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValidationError("top_k must be a positive integer")
@@ -368,39 +427,39 @@ class TidepoolClient:
             payload["ef_search"] = ef_search
         if nprobe is not None:
             payload["nprobe"] = nprobe
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         data = self._request_json(
             self._query_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
         )
-        return _parse_vector_results(data)
+        return _parse_query_response(data, namespace)
 
     def delete(self, ids: List[str], namespace: Optional[str] = None) -> None:
         normalized = _validate_ids(ids)
         payload = {"ids": normalized}
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         self._request_json(
             self._ingest_client, "DELETE", f"/v1/vectors/{namespace}", json_body=payload
         )
 
     def get_namespace(self, namespace: Optional[str] = None) -> NamespaceInfo:
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         data = self._request_json(self._query_client, "GET", f"/v1/namespaces/{namespace}")
         if not isinstance(data, dict):
             raise TidepoolError("Invalid namespace response")
         return _parse_namespace_info(data)
 
-    def list_namespaces(self) -> List[str]:
+    def get_namespace_status(self, namespace: Optional[str] = None) -> NamespaceStatus:
+        namespace = self._resolve_namespace(namespace)
+        data = self._request_json(
+            self._ingest_client, "GET", f"/v1/namespaces/{namespace}/status"
+        )
+        if not isinstance(data, dict):
+            raise TidepoolError("Invalid namespace status response")
+        return _parse_namespace_status(data)
+
+    def list_namespaces(self) -> List[NamespaceInfo]:
         data = self._request_json(self._query_client, "GET", "/v1/namespaces")
-        if isinstance(data, list):
-            return [str(name) for name in data]
-        if isinstance(data, dict):
-            namespaces = data.get("namespaces")
-            if isinstance(namespaces, list):
-                return [str(name) for name in namespaces]
-            namespace_list = data.get("namespace_list")
-            if isinstance(namespace_list, list):
-                return [str(name) for name in namespace_list]
-        raise TidepoolError("Invalid namespaces response")
+        return _parse_namespaces(data)
 
     def status(self) -> IngestStatus:
         data = self._request_json(self._ingest_client, "GET", "/status")
@@ -408,8 +467,11 @@ class TidepoolClient:
             raise TidepoolError("Invalid status response")
         return _parse_ingest_status(data)
 
-    def compact(self) -> None:
-        self._request_json(self._ingest_client, "POST", "/compact")
+    def compact(self, namespace: Optional[str] = None) -> None:
+        namespace = self._resolve_namespace(namespace)
+        self._request_json(
+            self._ingest_client, "POST", f"/v1/namespaces/{namespace}/compact"
+        )
 
 
 class AsyncTidepoolClient:
@@ -424,9 +486,12 @@ class AsyncTidepoolClient:
         query_url: str = "http://localhost:8080",
         ingest_url: str = "http://localhost:8081",
         timeout: float = 30.0,
-        namespace: str = "default",
+        default_namespace: str = "default",
+        namespace: Optional[str] = None,
     ) -> None:
-        self._namespace = namespace
+        if namespace is not None:
+            default_namespace = namespace
+        self._default_namespace = _normalize_namespace(default_namespace, "default")
         limits = httpx.Limits(max_connections=10, max_keepalive_connections=10)
         self._query_client = httpx.AsyncClient(
             base_url=query_url,
@@ -455,6 +520,9 @@ class AsyncTidepoolClient:
         if service == "ingest":
             return self._ingest_client
         raise ValidationError("Service must be 'query' or 'ingest'")
+
+    def _resolve_namespace(self, namespace: Optional[str]) -> str:
+        return _normalize_namespace(namespace, self._default_namespace)
 
     async def _with_retry(self, func):
         last_error: Optional[Exception] = None
@@ -528,7 +596,7 @@ class AsyncTidepoolClient:
         }
         if metric is not None:
             payload["distance_metric"] = metric
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         await self._request_json(
             self._ingest_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
         )
@@ -543,7 +611,7 @@ class AsyncTidepoolClient:
         filters: Optional[Dict[str, AttrValue]] = None,
         ef_search: Optional[int] = None,
         nprobe: Optional[int] = None,
-    ) -> List[VectorResult]:
+    ) -> QueryResponse:
         vec = _validate_vector(vector)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValidationError("top_k must be a positive integer")
@@ -564,22 +632,22 @@ class AsyncTidepoolClient:
             payload["ef_search"] = ef_search
         if nprobe is not None:
             payload["nprobe"] = nprobe
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         data = await self._request_json(
             self._query_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
         )
-        return _parse_vector_results(data)
+        return _parse_query_response(data, namespace)
 
     async def delete(self, ids: List[str], namespace: Optional[str] = None) -> None:
         normalized = _validate_ids(ids)
         payload = {"ids": normalized}
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         await self._request_json(
             self._ingest_client, "DELETE", f"/v1/vectors/{namespace}", json_body=payload
         )
 
     async def get_namespace(self, namespace: Optional[str] = None) -> NamespaceInfo:
-        namespace = _normalize_namespace(namespace, self._namespace)
+        namespace = self._resolve_namespace(namespace)
         data = await self._request_json(
             self._query_client, "GET", f"/v1/namespaces/{namespace}"
         )
@@ -587,18 +655,18 @@ class AsyncTidepoolClient:
             raise TidepoolError("Invalid namespace response")
         return _parse_namespace_info(data)
 
-    async def list_namespaces(self) -> List[str]:
+    async def get_namespace_status(self, namespace: Optional[str] = None) -> NamespaceStatus:
+        namespace = self._resolve_namespace(namespace)
+        data = await self._request_json(
+            self._ingest_client, "GET", f"/v1/namespaces/{namespace}/status"
+        )
+        if not isinstance(data, dict):
+            raise TidepoolError("Invalid namespace status response")
+        return _parse_namespace_status(data)
+
+    async def list_namespaces(self) -> List[NamespaceInfo]:
         data = await self._request_json(self._query_client, "GET", "/v1/namespaces")
-        if isinstance(data, list):
-            return [str(name) for name in data]
-        if isinstance(data, dict):
-            namespaces = data.get("namespaces")
-            if isinstance(namespaces, list):
-                return [str(name) for name in namespaces]
-            namespace_list = data.get("namespace_list")
-            if isinstance(namespace_list, list):
-                return [str(name) for name in namespace_list]
-        raise TidepoolError("Invalid namespaces response")
+        return _parse_namespaces(data)
 
     async def status(self) -> IngestStatus:
         data = await self._request_json(self._ingest_client, "GET", "/status")
@@ -606,5 +674,8 @@ class AsyncTidepoolClient:
             raise TidepoolError("Invalid status response")
         return _parse_ingest_status(data)
 
-    async def compact(self) -> None:
-        await self._request_json(self._ingest_client, "POST", "/compact")
+    async def compact(self, namespace: Optional[str] = None) -> None:
+        namespace = self._resolve_namespace(namespace)
+        await self._request_json(
+            self._ingest_client, "POST", f"/v1/namespaces/{namespace}/compact"
+        )

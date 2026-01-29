@@ -6,6 +6,8 @@ from .types import (
     Document,
     IngestStatus,
     NamespaceInfo,
+    NamespaceStatus,
+    QueryResponse,
     Vector,
     VectorResult,
 )
@@ -18,6 +20,8 @@ __all__ = [
     "Document",
     "IngestStatus",
     "NamespaceInfo",
+    "NamespaceStatus",
+    "QueryResponse",
     "Vector",
     "VectorResult",
     "TidepoolError",

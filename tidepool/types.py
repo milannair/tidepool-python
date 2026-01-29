@@ -33,6 +33,12 @@ class VectorResult:
     attributes: Optional[Dict[str, AttrValue]] = None
 
 
+@dataclass
+class QueryResponse:
+    results: List[VectorResult]
+    namespace: str
+
+
 class DistanceMetric(str, Enum):
     COSINE = "cosine_distance"
     EUCLIDEAN = "euclidean_squared"
@@ -43,6 +49,17 @@ class DistanceMetric(str, Enum):
 class NamespaceInfo:
     namespace: str
     approx_count: int
+    dimensions: int
+    pending_compaction: Optional[bool] = None
+
+
+@dataclass
+class NamespaceStatus:
+    last_run: Optional[datetime]
+    wal_files: int
+    wal_entries: int
+    segments: int
+    total_vecs: int
     dimensions: int
 
 
