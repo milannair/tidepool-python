@@ -71,7 +71,7 @@ asyncio.run(main())
 
 - `TidepoolClient.health(service="query" | "ingest")`
 - `TidepoolClient.upsert(vectors, namespace=None, distance_metric=DistanceMetric.COSINE)`
-- `TidepoolClient.query(vector, top_k=10, namespace=None, include_vectors=False, filters=None, ef_search=None, nprobe=None)`
+- `TidepoolClient.query(vector, top_k=10, namespace=None, distance_metric=DistanceMetric.COSINE, include_vectors=False, filters=None, ef_search=None, nprobe=None)`
 - `TidepoolClient.delete(ids, namespace=None)`
 - `TidepoolClient.get_namespace(namespace=None)`
 - `TidepoolClient.list_namespaces()`

@@ -23,9 +23,6 @@ from .types import (
     VectorResult,
 )
 
-MAX_TOP_K = 1000
-
-
 def _normalize_namespace(namespace: Optional[str], default: str) -> str:
     if namespace is None:
         namespace = default
@@ -34,7 +31,11 @@ def _normalize_namespace(namespace: Optional[str], default: str) -> str:
     return namespace
 
 
-def _normalize_distance_metric(distance_metric: DistanceMetric | str) -> str:
+def _normalize_distance_metric(
+    distance_metric: DistanceMetric | str | None,
+) -> Optional[str]:
+    if distance_metric is None:
+        return None
     if isinstance(distance_metric, DistanceMetric):
         return distance_metric.value
     if isinstance(distance_metric, str):
@@ -167,13 +168,28 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(value)
 
 
-def _parse_vector_results(data: Dict[str, Any]) -> List[VectorResult]:
+def _parse_vector_results(data: Any) -> List[VectorResult]:
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        if isinstance(data.get("results"), list):
+            items = data["results"]
+        elif isinstance(data.get("vectors"), list):
+            items = data["vectors"]
+        else:
+            raise TidepoolError("Invalid query response")
+    else:
+        raise TidepoolError("Invalid query response")
+
     results: List[VectorResult] = []
-    for item in data.get("results", []) or []:
+    for item in items:
+        if not isinstance(item, dict):
+            raise TidepoolError("Invalid query response")
+        dist_value = item.get("dist", item.get("distance", 0.0))
         results.append(
             VectorResult(
                 id=item.get("id"),
-                dist=float(item.get("dist", 0.0)),
+                dist=float(dist_value or 0.0),
                 vector=item.get("vector"),
                 attributes=item.get("attributes"),
             )
@@ -307,13 +323,15 @@ class TidepoolClient:
         self,
         vectors: List[Document],
         namespace: Optional[str] = None,
-        distance_metric: DistanceMetric = DistanceMetric.COSINE,
+        distance_metric: DistanceMetric | str | None = DistanceMetric.COSINE,
     ) -> None:
         normalized = _validate_documents(vectors)
+        metric = _normalize_distance_metric(distance_metric)
         payload = {
             "vectors": [_document_to_payload(doc) for doc in normalized],
-            "distance_metric": _normalize_distance_metric(distance_metric),
         }
+        if metric is not None:
+            payload["distance_metric"] = metric
         namespace = _normalize_namespace(namespace, self._namespace)
         self._request_json(
             self._ingest_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
@@ -324,7 +342,7 @@ class TidepoolClient:
         vector: Vector,
         top_k: int = 10,
         namespace: Optional[str] = None,
-        distance_metric: DistanceMetric = DistanceMetric.COSINE,
+        distance_metric: DistanceMetric | str | None = DistanceMetric.COSINE,
         include_vectors: bool = False,
         filters: Optional[Dict[str, AttrValue]] = None,
         ef_search: Optional[int] = None,
@@ -333,17 +351,17 @@ class TidepoolClient:
         vec = _validate_vector(vector)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValidationError("top_k must be a positive integer")
-        if top_k > MAX_TOP_K:
-            raise ValidationError(f"top_k must be <= {MAX_TOP_K}")
         _validate_filters(filters)
         ef_search = _validate_positive_int(ef_search, "ef_search")
         nprobe = _validate_positive_int(nprobe, "nprobe")
+        metric = _normalize_distance_metric(distance_metric)
         payload: Dict[str, Any] = {
             "vector": vec,
             "top_k": top_k,
-            "distance_metric": _normalize_distance_metric(distance_metric),
             "include_vectors": bool(include_vectors),
         }
+        if metric is not None:
+            payload["distance_metric"] = metric
         if filters is not None:
             payload["filters"] = filters
         if ef_search is not None:
@@ -354,8 +372,6 @@ class TidepoolClient:
         data = self._request_json(
             self._query_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
         )
-        if not isinstance(data, dict):
-            raise TidepoolError("Invalid query response")
         return _parse_vector_results(data)
 
     def delete(self, ids: List[str], namespace: Optional[str] = None) -> None:
@@ -375,12 +391,16 @@ class TidepoolClient:
 
     def list_namespaces(self) -> List[str]:
         data = self._request_json(self._query_client, "GET", "/v1/namespaces")
-        if not isinstance(data, dict):
-            raise TidepoolError("Invalid namespaces response")
-        namespaces = data.get("namespaces", [])
-        if not isinstance(namespaces, list):
-            raise TidepoolError("Invalid namespaces response")
-        return [str(name) for name in namespaces]
+        if isinstance(data, list):
+            return [str(name) for name in data]
+        if isinstance(data, dict):
+            namespaces = data.get("namespaces")
+            if isinstance(namespaces, list):
+                return [str(name) for name in namespaces]
+            namespace_list = data.get("namespace_list")
+            if isinstance(namespace_list, list):
+                return [str(name) for name in namespace_list]
+        raise TidepoolError("Invalid namespaces response")
 
     def status(self) -> IngestStatus:
         data = self._request_json(self._ingest_client, "GET", "/status")
@@ -499,13 +519,15 @@ class AsyncTidepoolClient:
         self,
         vectors: List[Document],
         namespace: Optional[str] = None,
-        distance_metric: DistanceMetric = DistanceMetric.COSINE,
+        distance_metric: DistanceMetric | str | None = DistanceMetric.COSINE,
     ) -> None:
         normalized = _validate_documents(vectors)
+        metric = _normalize_distance_metric(distance_metric)
         payload = {
             "vectors": [_document_to_payload(doc) for doc in normalized],
-            "distance_metric": _normalize_distance_metric(distance_metric),
         }
+        if metric is not None:
+            payload["distance_metric"] = metric
         namespace = _normalize_namespace(namespace, self._namespace)
         await self._request_json(
             self._ingest_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
@@ -516,7 +538,7 @@ class AsyncTidepoolClient:
         vector: Vector,
         top_k: int = 10,
         namespace: Optional[str] = None,
-        distance_metric: DistanceMetric = DistanceMetric.COSINE,
+        distance_metric: DistanceMetric | str | None = DistanceMetric.COSINE,
         include_vectors: bool = False,
         filters: Optional[Dict[str, AttrValue]] = None,
         ef_search: Optional[int] = None,
@@ -525,17 +547,17 @@ class AsyncTidepoolClient:
         vec = _validate_vector(vector)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValidationError("top_k must be a positive integer")
-        if top_k > MAX_TOP_K:
-            raise ValidationError(f"top_k must be <= {MAX_TOP_K}")
         _validate_filters(filters)
         ef_search = _validate_positive_int(ef_search, "ef_search")
         nprobe = _validate_positive_int(nprobe, "nprobe")
+        metric = _normalize_distance_metric(distance_metric)
         payload: Dict[str, Any] = {
             "vector": vec,
             "top_k": top_k,
-            "distance_metric": _normalize_distance_metric(distance_metric),
             "include_vectors": bool(include_vectors),
         }
+        if metric is not None:
+            payload["distance_metric"] = metric
         if filters is not None:
             payload["filters"] = filters
         if ef_search is not None:
@@ -546,8 +568,6 @@ class AsyncTidepoolClient:
         data = await self._request_json(
             self._query_client, "POST", f"/v1/vectors/{namespace}", json_body=payload
         )
-        if not isinstance(data, dict):
-            raise TidepoolError("Invalid query response")
         return _parse_vector_results(data)
 
     async def delete(self, ids: List[str], namespace: Optional[str] = None) -> None:
@@ -569,12 +589,16 @@ class AsyncTidepoolClient:
 
     async def list_namespaces(self) -> List[str]:
         data = await self._request_json(self._query_client, "GET", "/v1/namespaces")
-        if not isinstance(data, dict):
-            raise TidepoolError("Invalid namespaces response")
-        namespaces = data.get("namespaces", [])
-        if not isinstance(namespaces, list):
-            raise TidepoolError("Invalid namespaces response")
-        return [str(name) for name in namespaces]
+        if isinstance(data, list):
+            return [str(name) for name in data]
+        if isinstance(data, dict):
+            namespaces = data.get("namespaces")
+            if isinstance(namespaces, list):
+                return [str(name) for name in namespaces]
+            namespace_list = data.get("namespace_list")
+            if isinstance(namespace_list, list):
+                return [str(name) for name in namespace_list]
+        raise TidepoolError("Invalid namespaces response")
 
     async def status(self) -> IngestStatus:
         data = await self._request_json(self._ingest_client, "GET", "/status")
