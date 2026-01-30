@@ -1,10 +1,18 @@
 [project]
 name = "tidepool"
 version = "0.1.0"
-description = "Python client for Tidepool"
+description = "Python client for Tidepool vector database"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.9"
+authors = [
+  {name = "Milan Nair"}
+]
+
+[project.urls]
+Homepage = "https://github.com/milannair/tidepool"
+Repository = "https://github.com/milannair/tidepool-clients"
+Documentation = "https://github.com/milannair/tidepool-clients/tree/main/tidepool-python"
 dependencies = [
   "httpx>=0.24.0",
 ]

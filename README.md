@@ -2,17 +2,17 @@
 
 A lightweight Python client for Tidepool's query and ingest HTTP services.
 
-## Features
+## Highlights
 
 - Sync and async clients
-- Vector upserts, queries, deletes
-- Namespace inspection
-- Ingest status + compaction
-- Validation + helpful error mapping
+- Vector, text, and hybrid search
+- Namespace management, status, and compaction
+- Input validation and structured errors
+- Automatic retry on 503/network errors (configurable)
 
-## Documentation
+## Requirements
 
-- `docs/PYTHON_CLIENT.md` — API reference and namespace examples
+- Python 3.9+
 
 ## Install
 
@@ -20,13 +20,13 @@ A lightweight Python client for Tidepool's query and ingest HTTP services.
 pip install tidepool
 ```
 
-If you're installing from source:
+From source:
 
 ```bash
 pip install -e .
 ```
 
-## Quickstart
+## Quickstart (Sync)
 
 ```python
 from tidepool import TidepoolClient, Document
@@ -48,8 +48,6 @@ client.upsert(
     ]
 )
 
-client.compact()
-
 response = client.query(
     vector=[0.1, 0.2, 0.3, 0.4],
     text="machine learning",
@@ -57,6 +55,7 @@ response = client.query(
     top_k=5,
     alpha=0.7,
 )
+
 for result in response.results:
     print(result.id, result.score)
 ```
@@ -79,7 +78,64 @@ async def main():
 asyncio.run(main())
 ```
 
+## Configuration
+
+- `query_url` and `ingest_url` set base URLs. Defaults:
+  - Query: `http://localhost:8080`
+  - Ingest: `http://localhost:8081`
+- `default_namespace` sets the namespace used when one is not provided. Default is `default`.
+- `namespace` is supported for backward compatibility and overrides `default_namespace`.
+- `timeout` controls the HTTP timeout (seconds).
+
+## Query Modes
+
+- Vector-only: provide `vector`, omit `text`.
+- Text-only: provide `text`, set `mode="text"`.
+- Hybrid: provide both, set `mode="hybrid"`.
+
+```python
+response = client.query(text="fraud detection", mode="text", top_k=10)
+```
+
+## Namespaces
+
+All write/query/delete methods accept `namespace`. When omitted, the client uses `default_namespace`.
+
+```python
+client.upsert(docs, namespace="tenant-a")
+```
+
+## Errors
+
+Errors map to explicit types:
+
+- `ValidationError` for invalid inputs
+- `NotFoundError` when resources are missing
+- `ServiceUnavailableError` for 503s
+- `TidepoolError` for other failures
+
+```python
+from tidepool import ValidationError
+
+try:
+    client.query(vector=[0.1], top_k=-1)
+except ValidationError:
+    print("invalid input")
+```
+
+## Retries
+
+Both sync and async clients retry on HTTP 503 and network errors with exponential backoff. You can tune:
+
+```python
+client.max_retries = 5
+client.base_delay = 0.5
+client.max_delay = 10.0
+```
+
 ## API Overview
+
+Sync client:
 
 - `TidepoolClient.health(service="query" | "ingest")`
 - `TidepoolClient.upsert(vectors, namespace=None, distance_metric=DistanceMetric.COSINE)`
@@ -91,7 +147,17 @@ asyncio.run(main())
 - `TidepoolClient.status()`
 - `TidepoolClient.compact(namespace=None)`
 
-The async client mirrors the same API.
+The async client mirrors the same API (`AsyncTidepoolClient`).
+
+## Testing
+
+```bash
+python -m unittest
+```
+
+## Documentation
+
+- `docs/PYTHON_CLIENT.md` — API reference and namespace examples
 
 ## License
 

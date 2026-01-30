@@ -33,7 +33,7 @@ def _normalize_namespace(namespace: Optional[str], default: str) -> str:
         namespace = default
     if not isinstance(namespace, str) or not namespace.strip():
         raise ValidationError("Namespace must be a non-empty string")
-    return namespace
+    return namespace.strip()
 
 
 def _normalize_distance_metric(
